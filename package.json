@@ -1,0 +1,15 @@
+{
+  "name": "crm-bot-api",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.6.0",
+    "@supabase/supabase-js": "^2.39.0",
+    "express": "^4.18.2",
+    "qrcode": "^1.5.3",
+    "dotenv": "^16.3.1"
+  }
+}
