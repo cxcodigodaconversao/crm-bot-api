@@ -1,7 +1,8 @@
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
+const pino = require('pino');
 
 const app = express();
 app.use(express.json());
@@ -31,6 +32,8 @@ if (SUPABASE_URL && SUPABASE_KEY) {
 const activeSessions = new Map();
 const qrCodes = new Map();
 
+const logger = pino({ level: 'silent' });
+
 function verificarChave(req, res, next) {
     const apiKey = req.headers['x-api-key'] || req.body.api_key;
     if (apiKey !== API_SECRET_KEY) {
@@ -43,7 +46,7 @@ app.get('/', (req, res) => {
     res.json({ 
         status: 'online',
         service: 'CRM Bot API',
-        version: '2.0.0',
+        version: '3.0.0',
         message: 'API funcionando com QR Code',
         timestamp: new Date().toISOString()
     });
@@ -74,52 +77,82 @@ app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
         }
 
         const { state, saveCreds } = await useMultiFileAuthState(`./sessions/${userId}`);
+        const { version } = await fetchLatestBaileysVersion();
         
         const sock = makeWASocket({
+            version,
+            logger,
             auth: state,
-            printQRInTerminal: false
+            printQRInTerminal: false,
+            browser: ['CRM Bot', 'Chrome', '10.0.0'],
+            defaultQueryTimeoutMs: undefined,
+            connectTimeoutMs: 60000,
+            keepAliveIntervalMs: 10000,
+            emitOwnEvents: true,
+            getMessage: async (key) => {
+                return { conversation: '' };
+            }
         });
 
         sock.ev.on('creds.update', saveCreds);
 
         let qrGenerated = false;
+        let qrAttempts = 0;
+        const maxQrAttempts = 3;
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
-            if (qr && !qrGenerated) {
-                console.log('QR Code gerado');
-                const qrCodeImage = await QRCode.toDataURL(qr);
-                qrCodes.set(userId, qrCodeImage);
-                qrGenerated = true;
+            if (qr) {
+                qrAttempts++;
+                console.log(`QR Code gerado (tentativa ${qrAttempts})`);
+                
+                try {
+                    const qrCodeImage = await QRCode.toDataURL(qr);
+                    qrCodes.set(userId, qrCodeImage);
+                    qrGenerated = true;
 
-                if (supabase) {
-                    await supabase.from('whatsapp_sessions').upsert({
-                        user_id: userId,
-                        qr_code: qrCodeImage,
-                        status: 'awaiting_scan'
-                    });
+                    if (supabase) {
+                        await supabase.from('whatsapp_sessions').upsert({
+                            user_id: userId,
+                            qr_code: qrCodeImage,
+                            status: 'awaiting_scan',
+                            attempt: qrAttempts
+                        });
+                    }
+                } catch (err) {
+                    console.error('Erro ao gerar QR Code:', err);
                 }
             }
 
             if (connection === 'close') {
-                console.log('Conexao fechada');
+                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                console.log('Conexao fechada. Reconectar?', shouldReconnect);
+                
                 activeSessions.delete(userId);
-                qrCodes.delete(userId);
+                
+                if (qrAttempts >= maxQrAttempts) {
+                    qrCodes.delete(userId);
+                    console.log('Maximo de tentativas atingido');
+                }
 
                 if (supabase) {
-                    await supabase.from('whatsapp_sessions').update({ status: 'disconnected' }).eq('user_id', userId);
+                    await supabase.from('whatsapp_sessions').update({ 
+                        status: 'disconnected',
+                        error: lastDisconnect?.error?.message || 'unknown'
+                    }).eq('user_id', userId);
                 }
             }
 
             if (connection === 'open') {
-                console.log('WhatsApp conectado');
+                console.log('WhatsApp conectado com sucesso!');
                 qrCodes.delete(userId);
 
                 if (supabase) {
                     await supabase.from('whatsapp_sessions').update({ 
                         status: 'connected',
-                        phone_number: sock.user.id.split(':')[0]
+                        phone_number: sock.user.id.split(':')[0],
+                        qr_code: null
                     }).eq('user_id', userId);
                 }
             }
@@ -128,8 +161,9 @@ app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
         sock.ev.on('messages.upsert', async ({ messages }) => {
             const msg = messages[0];
             if (!msg.key.fromMe && msg.message) {
-                const messageText = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-                console.log('Nova mensagem:', messageText);
+                const messageText = msg.message.conversation || 
+                                  msg.message.extendedTextMessage?.text || '';
+                console.log('Nova mensagem recebida');
 
                 if (supabase) {
                     await supabase.from('messages').insert({
@@ -146,23 +180,33 @@ app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
         activeSessions.set(userId, sock);
 
         let attempts = 0;
-        while (!qrCodes.has(userId) && attempts < 25) {
-            await new Promise(resolve => setTimeout(resolve, 200));
+        const maxAttempts = 60;
+        while (!qrCodes.has(userId) && attempts < maxAttempts) {
+            await new Promise(resolve => setTimeout(resolve, 500));
             attempts++;
         }
 
         const qrCode = qrCodes.get(userId);
 
+        if (qrCode) {
+            console.log('QR Code pronto para enviar');
+        } else {
+            console.log('QR Code nao gerado dentro do timeout');
+        }
+
         res.json({ 
-            success: true, 
-            message: 'Escaneie o QR Code',
+            success: !!qrCode, 
+            message: qrCode ? 'Escaneie o QR Code' : 'Aguarde, gerando QR Code...',
             userId: userId,
             qrCode: qrCode || null
         });
 
     } catch (error) {
-        console.error('Erro:', error);
-        res.status(500).json({ error: error.message });
+        console.error('Erro ao conectar WhatsApp:', error);
+        res.status(500).json({ 
+            error: error.message,
+            details: 'Verifique os logs do servidor'
+        });
     }
 });
 
@@ -225,5 +269,6 @@ app.post('/api/instagram/connect', verificarChave, async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log('Servidor rodando na porta', PORT);
+    console.log(`Servidor rodando na porta ${PORT}`);
+    console.log('API pronta para conectar WhatsApp');
 });
