@@ -20,7 +20,7 @@ const API_SECRET_KEY = process.env.API_SECRET_KEY || 'crm_2025_super_secret_xyz7
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-console.log('Servidor iniciando...');
+console.log('Servidor iniciando');
 
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_KEY) {
@@ -227,24 +227,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log('Servidor rodando na porta', PORT);
 });
-```
-
-**7.** **IMPORTANTE:** Role até o FINAL do código para ter certeza que copiou TUDO!
-
-**8.** Clique em **"Commit changes"**
-
-**9.** Aguarde 30-60 segundos
-
----
-
-## ✅ **VERIFICAR:**
-
-**1.** Volte no Railway
-
-**2.** Veja os logs
-
-**3.** Deve aparecer:
-```
-Servidor iniciando...
-Supabase conectado
-Servidor rodando na porta 8080
