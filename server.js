@@ -160,33 +160,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 API rodando na porta ${PORT}`);
 });
-```
-
-4. Clique em **"Commit changes"**
-
----
-
-### **PASSO 4: Fazer Deploy no Railway (100% Online)**
-
-1. Acesse: https://railway.app/
-2. Clique em **"Login"** → **"Login with GitHub"**
-3. Autorize o Railway a acessar seus repositórios
-4. Clique em **"New Project"**
-5. Selecione **"Deploy from GitHub repo"**
-6. Escolha o repositório `crm-bot-api`
-7. Clique em **"Deploy Now"**
-
----
-
-### **PASSO 5: Configurar Variáveis de Ambiente no Railway**
-
-1. No painel do Railway, clique no seu projeto
-2. Vá na aba **"Variables"**
-3. Clique em **"+ New Variable"**
-4. Adicione estas 3 variáveis:
-```
-API_SECRET_KEY = crm_2025_chave_secreta_xyz789
-
-SUPABASE_URL = (você vai pegar no próximo passo)
-
-SUPABASE_KEY = (você vai pegar no próximo passo)
