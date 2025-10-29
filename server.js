@@ -159,26 +159,3 @@ app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
         });
     }
 });
-```
-
-**5.** Clique em **"Commit changes"**
-
----
-
-### **PASSO 2: Atualizar o Frontend no Lovable**
-
-**1.** No Lovable, no chat **"Ask Lovable..."**, cole:
-```
-Adicione suporte para Pairing Code do WhatsApp:
-
-1. Adicione um campo de input para o usuário digitar o número de telefone (com código do país, ex: 5511999999999)
-
-2. Ao clicar em "Gerar QR Code", se o número estiver preenchido:
-   - Enviar no POST: { userId, phoneNumber }
-   - A API vai retornar: { success: true, pairingCode: "12345678", method: "pairing" }
-   - Mostrar o código grande na tela: "Digite este código no WhatsApp: 1234-5678"
-   - Instruções: "1. Abra WhatsApp > Aparelhos conectados > Conectar aparelho > Vincular com número"
-
-3. Se não tiver número, funciona normal com QR Code
-
-4. Adicione botão para alternar entre os dois métodos
