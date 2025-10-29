@@ -1,64 +1,6 @@
-const express = require('express');
-const { createClient } = require('@supabase/supabase-js');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
-const QRCode = require('qrcode');
-const pino = require('pino');
-
-const app = express();
-app.use(express.json());
-
-app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
-    if (req.method === 'OPTIONS') {
-        return res.sendStatus(200);
-    }
-    next();
-});
-
-const API_SECRET_KEY = process.env.API_SECRET_KEY || 'crm_2025_super_secret_xyz789';
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
-
-console.log('Servidor iniciando');
-
-let supabase = null;
-if (SUPABASE_URL && SUPABASE_KEY) {
-    supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-    console.log('Supabase conectado');
-}
-
-const activeSessions = new Map();
-const qrCodes = new Map();
-
-const logger = pino({ level: 'silent' });
-
-function verificarChave(req, res, next) {
-    const apiKey = req.headers['x-api-key'] || req.body.api_key;
-    if (apiKey !== API_SECRET_KEY) {
-        return res.status(401).json({ error: 'Chave API invalida' });
-    }
-    next();
-}
-
-app.get('/', (req, res) => {
-    res.json({ 
-        status: 'online',
-        service: 'CRM Bot API',
-        version: '3.0.0',
-        message: 'API funcionando com QR Code',
-        timestamp: new Date().toISOString()
-    });
-});
-
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok', uptime: process.uptime() });
-});
-
 app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
     try {
-        const { userId } = req.body;
+        const { userId, phoneNumber } = req.body;
         
         if (!userId) {
             return res.status(400).json({ error: 'userId obrigatorio' });
@@ -84,11 +26,12 @@ app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
             logger,
             auth: state,
             printQRInTerminal: false,
-            browser: ['CRM Bot', 'Chrome', '10.0.0'],
-            defaultQueryTimeoutMs: undefined,
+            browser: ['Chrome (Linux)', '', ''],
+            defaultQueryTimeoutMs: 60000,
             connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 10000,
-            emitOwnEvents: true,
+            keepAliveIntervalMs: 30000,
+            markOnlineOnConnect: true,
+            syncFullHistory: false,
             getMessage: async (key) => {
                 return { conversation: '' };
             }
@@ -96,17 +39,26 @@ app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
 
         sock.ev.on('creds.update', saveCreds);
 
+        let pairingCode = null;
         let qrGenerated = false;
-        let qrAttempts = 0;
-        const maxQrAttempts = 3;
+
+        // Se tiver número de telefone, gera pairing code
+        if (phoneNumber) {
+            try {
+                const cleanPhone = phoneNumber.replace(/\D/g, '');
+                const code = await sock.requestPairingCode(cleanPhone);
+                pairingCode = code;
+                console.log('Pairing code gerado:', code);
+            } catch (err) {
+                console.error('Erro ao gerar pairing code:', err);
+            }
+        }
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
-            if (qr) {
-                qrAttempts++;
-                console.log(`QR Code gerado (tentativa ${qrAttempts})`);
-                
+            if (qr && !pairingCode) {
+                console.log('QR Code gerado');
                 try {
                     const qrCodeImage = await QRCode.toDataURL(qr);
                     qrCodes.set(userId, qrCodeImage);
@@ -116,8 +68,7 @@ app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
                         await supabase.from('whatsapp_sessions').upsert({
                             user_id: userId,
                             qr_code: qrCodeImage,
-                            status: 'awaiting_scan',
-                            attempt: qrAttempts
+                            status: 'awaiting_scan'
                         });
                     }
                 } catch (err) {
@@ -126,20 +77,13 @@ app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
             }
 
             if (connection === 'close') {
-                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log('Conexao fechada. Reconectar?', shouldReconnect);
-                
+                console.log('Conexao fechada');
                 activeSessions.delete(userId);
-                
-                if (qrAttempts >= maxQrAttempts) {
-                    qrCodes.delete(userId);
-                    console.log('Maximo de tentativas atingido');
-                }
+                qrCodes.delete(userId);
 
                 if (supabase) {
                     await supabase.from('whatsapp_sessions').update({ 
-                        status: 'disconnected',
-                        error: lastDisconnect?.error?.message || 'unknown'
+                        status: 'disconnected'
                     }).eq('user_id', userId);
                 }
             }
@@ -179,8 +123,20 @@ app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
 
         activeSessions.set(userId, sock);
 
+        // Se gerou pairing code, retorna imediatamente
+        if (pairingCode) {
+            return res.json({ 
+                success: true, 
+                message: 'Digite o codigo no WhatsApp',
+                userId: userId,
+                pairingCode: pairingCode,
+                method: 'pairing'
+            });
+        }
+
+        // Senão, aguarda QR Code
         let attempts = 0;
-        const maxAttempts = 60;
+        const maxAttempts = 40;
         while (!qrCodes.has(userId) && attempts < maxAttempts) {
             await new Promise(resolve => setTimeout(resolve, 500));
             attempts++;
@@ -188,87 +144,41 @@ app.post('/api/whatsapp/connect', verificarChave, async (req, res) => {
 
         const qrCode = qrCodes.get(userId);
 
-        if (qrCode) {
-            console.log('QR Code pronto para enviar');
-        } else {
-            console.log('QR Code nao gerado dentro do timeout');
-        }
-
         res.json({ 
             success: !!qrCode, 
-            message: qrCode ? 'Escaneie o QR Code' : 'Aguarde, gerando QR Code...',
+            message: qrCode ? 'Escaneie o QR Code' : 'Aguarde...',
             userId: userId,
-            qrCode: qrCode || null
+            qrCode: qrCode || null,
+            method: 'qrcode'
         });
 
     } catch (error) {
         console.error('Erro ao conectar WhatsApp:', error);
         res.status(500).json({ 
-            error: error.message,
-            details: 'Verifique os logs do servidor'
+            error: error.message
         });
     }
 });
+```
 
-app.get('/api/whatsapp/qrcode/:userId', verificarChave, async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const qrCode = qrCodes.get(userId);
-        
-        res.json({ 
-            success: !!qrCode,
-            qrCode: qrCode || null,
-            userId: userId
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+**5.** Clique em **"Commit changes"**
 
-app.get('/api/whatsapp/status/:userId', verificarChave, async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const isActive = activeSessions.has(userId);
-        const hasQR = qrCodes.has(userId);
-        
-        res.json({
-            userId: userId,
-            active: isActive,
-            hasQRCode: hasQR,
-            status: isActive ? (hasQR ? 'awaiting_scan' : 'connected') : 'disconnected'
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+---
 
-app.post('/api/instagram/connect', verificarChave, async (req, res) => {
-    try {
-        const { userId, username } = req.body;
-        
-        console.log('Instagram conectando:', username);
+### **PASSO 2: Atualizar o Frontend no Lovable**
 
-        if (supabase) {
-            await supabase.from('instagram_sessions').upsert({
-                user_id: userId,
-                username: username,
-                status: 'connected'
-            });
-        }
+**1.** No Lovable, no chat **"Ask Lovable..."**, cole:
+```
+Adicione suporte para Pairing Code do WhatsApp:
 
-        res.json({ 
-            success: true, 
-            message: 'Instagram conectado',
-            userId: userId,
-            username: username
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+1. Adicione um campo de input para o usuário digitar o número de telefone (com código do país, ex: 5511999999999)
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Servidor rodando na porta ${PORT}`);
-    console.log('API pronta para conectar WhatsApp');
-});
+2. Ao clicar em "Gerar QR Code", se o número estiver preenchido:
+   - Enviar no POST: { userId, phoneNumber }
+   - A API vai retornar: { success: true, pairingCode: "12345678", method: "pairing" }
+   - Mostrar o código grande na tela: "Digite este código no WhatsApp: 1234-5678"
+   - Instruções: "1. Abra WhatsApp > Aparelhos conectados > Conectar aparelho > Vincular com número"
+
+3. Se não tiver número, funciona normal com QR Code
+
+4. Adicione botão para alternar entre os dois métodos
